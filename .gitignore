@@ -1,0 +1,49 @@
+# === Environment & Secrets ===
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# === IDE & Editor ===
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+.project
+.settings/
+.classpath
+out/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+*.pem
+
+# === Backend: Maven + Spring Boot ===
+backend/target/
+backend/*.log
+backend/src/main/resources/.env
+
+# === Frontend: Node + Vite ===
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.log
+
+# === Java ===
+*.class
+*.jar
+*.war
+*.ear
+target/
+*.log
+
+# === Logs ===
+logs/
+*.log.*
+
+# === Backup & Temporary ===
+*.bak
+*.tmp
+*.cache
