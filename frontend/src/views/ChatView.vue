@@ -35,6 +35,15 @@
 
     <!-- 输入区域 -->
     <div class="input-container">
+      <el-button
+        type="primary"
+        plain
+        size="small"
+        @click="newConversation"
+        class="new-chat-btn"
+      >
+        新对话
+      </el-button>
       <el-input
         v-model="input"
         type="textarea"
@@ -59,7 +68,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick, watch } from 'vue'
+import { ref, nextTick, watch, onMounted } from 'vue'
 import { Message } from '@element-plus/icons-vue'
 
 const messages = ref([])
@@ -67,6 +76,24 @@ const input = ref('')
 const loading = ref(false)
 const currentContent = ref('')
 const messagesRef = ref(null)
+
+// Session ID: from localStorage or generate new UUID
+const sessionId = ref(localStorage.getItem('pp_session_id') || '')
+if (!sessionId.value) {
+  sessionId.value = generateUUID()
+  localStorage.setItem('pp_session_id', sessionId.value)
+}
+
+/**
+ * Generate a simple UUID v4.
+ */
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0
+    const v = c === 'x' ? r : (r & 0x3) | 0x8
+    return v.toString(16)
+  })
+}
 
 // 滚动到底部
 const scrollToBottom = async () => {
@@ -82,33 +109,53 @@ watch(currentContent, () => {
 })
 
 /**
- * 发送消息
+ * Load conversation history from the server.
+ */
+const loadHistory = async () => {
+  try {
+    const response = await fetch(
+      `/api/chat/history?sessionId=${sessionId.value}&limit=20`
+    )
+    if (!response.ok) return
+    const data = await response.json()
+    messages.value = data.messages || []
+    scrollToBottom()
+  } catch (err) {
+    console.error('Failed to load history:', err)
+  }
+}
+
+/**
+ * Send a message with conversation context.
  */
 const sendMessage = async () => {
   const text = input.value.trim()
   if (!text || loading.value) return
 
-  // 1. 添加用户消息
+  // 1. Add user message to frontend list
   messages.value.push({ role: 'user', content: text })
   input.value = ''
 
-  // 2. 设置加载状态
+  // 2. Set loading state
   loading.value = true
   currentContent.value = ''
 
   try {
-    // 3. 发起 SSE 请求
+    // 3. SSE request with sessionId
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text })
+      body: JSON.stringify({
+        message: text,
+        sessionId: sessionId.value
+      })
     })
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`)
     }
 
-    // 4. 读取 SSE 流
+    // 4. Read SSE stream
     const reader = response.body.getReader()
     const decoder = new TextDecoder('utf-8')
     let buffer = ''
@@ -120,9 +167,9 @@ const sendMessage = async () => {
       const chunk = decoder.decode(value, { stream: true })
       buffer += chunk
 
-      // 按行分割处理
+      // Process line by line
       const lines = buffer.split('\n')
-      buffer = lines.pop() // 保留最后一个不完整的行
+      buffer = lines.pop() // Keep last incomplete line
 
       for (const line of lines) {
         const trimmed = line.trim()
@@ -134,7 +181,7 @@ const sendMessage = async () => {
         try {
           const data = JSON.parse(jsonStr)
           if (data.done) {
-            // 完成：将完整回复加入消息列表
+            // Complete: add full reply to message list
             if (currentContent.value) {
               messages.value.push({ role: 'assistant', content: currentContent.value })
               currentContent.value = ''
@@ -147,7 +194,7 @@ const sendMessage = async () => {
             currentContent.value += data.content
           }
 
-          // 如果是错误消息（content 且 done），同样处理
+          // Error message handling
           if (data.content && data.done) {
             if (currentContent.value) {
               messages.value.push({ role: 'assistant', content: currentContent.value })
@@ -156,13 +203,13 @@ const sendMessage = async () => {
             loading.value = false
           }
         } catch (e) {
-          // 跳过解析失败的行
+          // Skip lines that fail JSON parsing
         }
       }
     }
   } catch (err) {
     console.error('SSE request failed:', err)
-    // 显示错误
+    // Show error message
     if (currentContent.value) {
       messages.value.push({ role: 'assistant', content: currentContent.value })
       currentContent.value = ''
@@ -170,6 +217,20 @@ const sendMessage = async () => {
     loading.value = false
   }
 }
+
+/**
+ * Start a new conversation.
+ */
+const newConversation = () => {
+  sessionId.value = generateUUID()
+  localStorage.setItem('pp_session_id', sessionId.value)
+  messages.value = []
+}
+
+// Load history on mount
+onMounted(() => {
+  loadHistory()
+})
 </script>
 
 <style scoped>
@@ -275,6 +336,11 @@ const sendMessage = async () => {
   gap: 12px;
   align-items: flex-end;
   background: #fff;
+}
+
+.new-chat-btn {
+  flex-shrink: 0;
+  border-radius: 8px;
 }
 
 .chat-input {

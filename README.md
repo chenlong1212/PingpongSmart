@@ -2,17 +2,31 @@
 
 面向乒乓球用户的私有知识管理与智能问答平台。
 
-v0.1.0 — 最小可运行版本，跑通「用户提问 → 大模型回答 → 流式展示」这条核心链路。
+## 版本
 
-## 系统要求
+- **v0.1.1**（当前）— 聊天记录持久化 + 多轮对话上下文
+- v0.1.0 — 最小可运行版本，跑通核心链路
+
+## 快速开始
+
+### 前置条件
 
 - Java 21+
 - Maven 3.8+
 - Node.js 18+
+- MySQL 8.0+
 
-## 快速开始
+### 1. 安装并配置 MySQL
 
-### 1. 配置 API Key
+```powershell
+# 使用 Chocolatey 安装（如未安装）
+choco install mysql -y
+
+# 创建数据库
+mysql -u root -e "CREATE DATABASE pingpongsmt DEFAULT CHARACTER SET utf8mb4;"
+```
+
+### 2. 配置 API Key
 
 ```powershell
 Copy-Item backend/src/main/resources/.env.example backend/src/main/resources/.env
@@ -26,7 +40,9 @@ LLM_API_KEY=你的-API-Key
 LLM_MODEL=xopqwen36v35b
 ```
 
-### 2. 启动后端
+编辑 `backend/src/main/resources/application.yml`，确认数据库连接配置。
+
+### 3. 启动后端
 
 ```powershell
 cd backend
@@ -35,7 +51,7 @@ mvn spring-boot:run
 
 后端启动后监听 `http://localhost:8080`。
 
-### 3. 启动前端
+### 4. 启动前端
 
 打开新终端：
 
@@ -51,8 +67,9 @@ npm run dev
 
 | 层 | 技术 |
 |----|------|
-| 后端 | Spring Boot 3.2 + Java 21 |
+| 后端 | Spring Boot 3.2 + Java 21 + Spring Data JPA |
 | 前端 | Vue 3 + Element Plus + Vite |
+| 数据库 | MySQL 8.0 |
 | 流式通信 | SSE (Server-Sent Events) |
 | API 格式 | OpenAI 兼容 |
 
@@ -72,9 +89,15 @@ PingpongSmart/
 │       │   │   └── ChatController.java
 │       │   ├── dto/
 │       │   │   ├── ChatRequest.java
+│       │   │   ├── ChatHistoryResponse.java
 │       │   │   └── SseMessage.java
+│       │   ├── entity/
+│       │   │   └── ChatMessage.java
+│       │   ├── repository/
+│       │   │   └── ChatMessageRepository.java
 │       │   └── service/
-│       │       └── LlmService.java
+│       │       ├── LlmService.java
+│       │       └── SessionManager.java
 │       └── resources/
 │           ├── application.yml
 │           └── .env.example
@@ -88,8 +111,14 @@ PingpongSmart/
 │       └── views/
 │           └── ChatView.vue
 ├── README.md
+├── CHANGELOG.md
 └── docs/
-    └── v0.1.0/
+    ├── v0.1.0/
+    │   ├── spec.md
+    │   ├── plan.md
+    │   ├── task.md
+    │   └── checklist.md
+    └── v0.1.1/
         ├── spec.md
         ├── plan.md
         ├── task.md
@@ -105,7 +134,7 @@ PingpongSmart/
 **请求体：**
 
 ```json
-{ "message": "如何提高反手拧拉质量" }
+{ "message": "如何提高反手拧拉质量", "sessionId": "uuid" }
 ```
 
 **响应：** `text/event-stream`，每条数据为 JSON：
@@ -118,10 +147,29 @@ PingpongSmart/
 { "content": "", "done": true }
 ```
 
-## 不做的事 (v0.1.0)
+### GET /api/chat/history
 
-- 用户注册/登录
-- 聊天记录持久化
-- 乒乓球知识库 / RAG
-- 多轮对话上下文
-- 语音输入/输出
+加载指定会话的历史消息。
+
+**参数：**
+- `sessionId`（必填）：会话 ID
+- `limit`（可选，默认 20）：加载最近 N 条消息
+
+**响应：**
+
+```json
+{
+  "sessionId": "uuid",
+  "messages": [
+    { "role": "user", "content": "如何提高反手拧拉质量", "createdAt": "2026-06-15T12:00:00" },
+    { "role": "assistant", "content": "反手拧拉的关键是...", "createdAt": "2026-06-15T12:00:02" }
+  ]
+}
+```
+
+## 配置项
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `pingpong.chat.history-limit` | 20 | 页面加载时拉取的最近消息数 |
+| `pingpong.chat.context-rounds` | 10 | 发给 LLM 的上下文轮数 |
