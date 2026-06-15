@@ -3,9 +3,12 @@ package com.pingpongsmt.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pingpongsmt.config.LlmConfig;
+import com.pingpongsmt.entity.ChatMessage;
+import com.pingpongsmt.repository.ChatMessageRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpHeaders;
@@ -16,12 +19,16 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 import reactor.core.publisher.Flux;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
  * LLM (Large Language Model) API call service.
  * Uses OpenAI-compatible format to stream requests,
  * parses tokens one by one and returns Flux<String> (serialized SseMessage JSON).
+ * Supports multi-turn conversation context from persisted messages.
  */
 @Service
 public class LlmService {
@@ -31,11 +38,20 @@ public class LlmService {
     private final LlmConfig llmConfig;
     private final WebClient webClient;
     private final ObjectMapper objectMapper;
+    private final ChatMessageRepository messageRepository;
+    private final SessionManager sessionManager;
+
+    @Value("${pingpong.chat.context-rounds:10}")
+    private int contextRounds;
 
     @Autowired
-    public LlmService(LlmConfig llmConfig) {
+    public LlmService(LlmConfig llmConfig,
+                      ChatMessageRepository messageRepository,
+                      SessionManager sessionManager) {
         this.llmConfig = llmConfig;
         this.objectMapper = new ObjectMapper();
+        this.messageRepository = messageRepository;
+        this.sessionManager = sessionManager;
 
         this.webClient = WebClient.builder()
                 .baseUrl(llmConfig.getBaseUrl())
@@ -45,15 +61,54 @@ public class LlmService {
     }
 
     /**
-     * Stream the LLM API call.
-     * Each emitted String is a serialized SseMessage JSON.
+     * Build the messages array for the LLM request.
+     * Includes recent conversation context from the database.
      */
-    public Flux<String> chatStream(String message) {
+    private List<Map<String, String>> buildMessages(String currentMessage, String sessionId) {
+        List<Map<String, String>> messages = new ArrayList<>();
+
+        if (sessionId != null && !sessionId.isBlank() && sessionManager.isValidSession(sessionId)) {
+            // Load all history for this session
+            List<ChatMessage> history = messageRepository.findBySessionIdOrderByCreatedAtAsc(sessionId);
+
+            // Calculate how many historical messages to include
+            // Each round = 2 messages (user + assistant)
+            int maxMessages = contextRounds * 2;
+
+            // Take at most maxMessages from the end
+            int startIndex = Math.max(0, history.size() - maxMessages);
+            List<ChatMessage> contextMessages = history.subList(startIndex, history.size());
+
+            for (ChatMessage msg : contextMessages) {
+                Map<String, String> entry = new HashMap<>();
+                entry.put("role", msg.getRole());
+                entry.put("content", msg.getContent());
+                messages.add(entry);
+            }
+
+            log.info("Added {} messages from context (session: {}, total history: {}, context rounds: {})",
+                    contextMessages.size(), sessionId, history.size(), contextRounds);
+        }
+
+        // Append the current user message
+        Map<String, String> currentEntry = new HashMap<>();
+        currentEntry.put("role", "user");
+        currentEntry.put("content", currentMessage);
+        messages.add(currentEntry);
+
+        return messages;
+    }
+
+    /**
+     * Stream the LLM API call with conversation context.
+     * Also saves the assistant's full response to the database after the stream completes.
+     */
+    public Flux<String> chatStreamWithSave(String message, String sessionId) {
+        List<Map<String, String>> messages = buildMessages(message, sessionId);
+
         Map<String, Object> body = Map.of(
                 "model", llmConfig.getModel(),
-                "messages", java.util.List.of(
-                        Map.of("role", "user", "content", message)
-                ),
+                "messages", messages,
                 "stream", true
         );
 
@@ -65,8 +120,11 @@ public class LlmService {
             return Flux.just(serializeError("Request serialization failed"));
         }
 
-        log.info("Calling LLM API: model={}, url={}/chat/completions",
-                llmConfig.getModel(), llmConfig.getBaseUrl());
+        log.info("Calling LLM API: model={}, message_count={}, url={}/chat/completions",
+                llmConfig.getModel(), messages.size(), llmConfig.getBaseUrl());
+
+        // Buffer to collect full response
+        final StringBuilder fullContent = new StringBuilder();
 
         return webClient.post()
                 .uri("/chat/completions")
@@ -82,13 +140,45 @@ public class LlmService {
                 .filter(line -> line.startsWith("data: "))
                 .map(line -> line.substring(6).trim())
                 .filter(data -> !data.isEmpty() && !data.equals("[DONE]"))
+                .doOnNext(data -> {
+                    // Extract content token from SSE data for DB persistence
+                    try {
+                        JsonNode root = objectMapper.readTree(data);
+                        JsonNode content = root.path("choices").get(0).path("delta").path("content");
+                        if (content.isTextual()) {
+                            fullContent.append(content.asText(""));
+                        }
+                    } catch (Exception e) {
+                        log.warn("Failed to extract content for save: {}", data, e);
+                    }
+                })
                 .map(data -> parseSseData(data))
                 .filter(json -> json != null)
+                .doOnComplete(() -> {
+                    // Save AI reply to database
+                    if (sessionId != null && sessionManager.isValidSession(sessionId)) {
+                        ChatMessage assistantMessage = new ChatMessage();
+                        assistantMessage.setSessionId(sessionId);
+                        assistantMessage.setRole("assistant");
+                        assistantMessage.setContent(fullContent.toString());
+                        messageRepository.save(assistantMessage);
+                        log.info("Saved assistant reply to session: {} (length: {})",
+                                sessionId, fullContent.length());
+                    }
+                })
                 .onErrorResume(WebClientResponseException.class, this::handleApiError)
                 .onErrorResume(throwable -> {
                     log.error("LLM API stream error", throwable);
                     return Flux.just(serializeError("Request failed, please try again"));
                 });
+    }
+
+    /**
+     * Stream the LLM API call (legacy single-message mode, no context).
+     * Kept for backward compatibility with v0.1.0 behavior.
+     */
+    public Flux<String> chatStream(String message) {
+        return chatStreamWithSave(message, null);
     }
 
     /**
